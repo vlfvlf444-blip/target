@@ -1,0 +1,136 @@
+
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>레이저 사격 점수판</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background:#111; color:#eee; margin:0; padding:10px; }
+  h2 { text-align:center; margin:8px 0; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; }
+  .panel { background:#1c1c1c; border-radius:10px; padding:10px; }
+  img { max-width:100%; border-radius:6px; display:block; cursor:crosshair; }
+  .controls { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; align-items:center; margin:10px 0; }
+  button, input { font-size:16px; padding:8px 12px; border-radius:6px; border:none; }
+  button { background:#3b82f6; color:white; }
+  button.warn { background:#ef4444; }
+  input[type=number], input[type=text] { width:80px; }
+  #status { text-align:center; margin:8px 0; font-size:15px; color:#9ca3af; }
+  #shotlist { text-align:center; font-size:15px; }
+  #total { text-align:center; font-size:26px; font-weight:bold; color:#facc15; }
+  #timeLeft { text-align:center; font-size:20px; font-weight:bold; color:#38bdf8; }
+  #timeLeft.warn { color:#ef4444; }
+  table { margin:10px auto; border-collapse:collapse; font-size:14px; }
+  th, td { border:1px solid #333; padding:6px 10px; }
+  th { background:#222; }
+  label { font-size:14px; color:#9ca3af; }
+</style>
+</head>
+<body>
+  <h2>🎯 레이저 사격 점수판</h2>
+  <div id="status">상태 확인 중...</div>
+
+  <div class="controls">
+    <label>이름</label><input type="text" id="userName" placeholder="이름">
+    <label>사격횟수</label><input type="number" id="shotCount" min="2" max="10" value="5">
+    <label>시간제한(초, 0=없음)</label><input type="number" id="timeLimit" min="0" value="0">
+    <button onclick="newSession()">새 세션 시작</button>
+  </div>
+  <div class="controls">
+    <button onclick="startCalib()">캘리브레이션 시작</button>
+    <button class="warn" onclick="resetSession()">현재 세션 초기화</button>
+  </div>
+
+  <div class="row">
+    <div class="panel">
+      <div style="text-align:center;margin-bottom:4px;">원본 (캘리브레이션용 - 이미지 클릭)</div>
+      <img id="rawFeed" src="/video_raw">
+    </div>
+    <div class="panel">
+      <div style="text-align:center;margin-bottom:4px;">보정된 표적 + 점수</div>
+      <img id="scoreFeed" src="/video_score">
+    </div>
+  </div>
+
+  <div id="timeLeft"></div>
+  <div id="total">Total: -</div>
+  <div id="shotlist"></div>
+
+  <h3 style="text-align:center;">📋 지난 기록</h3>
+  <table id="historyTable">
+    <thead><tr><th>이름</th><th>시각</th><th>발수</th><th>총점</th><th>종료사유</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+<script>
+const rawFeed = document.getElementById('rawFeed');
+
+rawFeed.addEventListener('click', function(e) {
+  const rect = rawFeed.getBoundingClientRect();
+  const scaleX = rawFeed.naturalWidth / rect.width;
+  const scaleY = rawFeed.naturalHeight / rect.height;
+  const x = Math.round((e.clientX - rect.left) * scaleX);
+  const y = Math.round((e.clientY - rect.top) * scaleY);
+  fetch('/api/calibrate/click', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({x: x, y: y})
+  });
+});
+
+function startCalib() {
+  fetch('/api/calibrate/start', {method: 'POST'});
+}
+function newSession() {
+  const name = document.getElementById('userName').value;
+  const count = document.getElementById('shotCount').value;
+  const limit = document.getElementById('timeLimit').value;
+  fetch('/api/session/new', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({user_name: name, max_shots: parseInt(count), time_limit: parseInt(limit)})
+  });
+}
+function resetSession() {
+  fetch('/api/session/reset', {method: 'POST'});
+}
+
+function refreshState() {
+  fetch('/api/state').then(r => r.json()).then(data => {
+    let statusText = data.calibrated ? '✅ 캘리브레이션 완료' : '⚠️ 캘리브레이션 필요 (버튼을 누르고 4점 클릭)';
+    if (data.calibrating) statusText = `캘리브레이션 중: ${data.corner_count}/4 점 클릭됨`;
+    if (!data.session_active) {
+      const reasonTxt = data.end_reason === 'time_up' ? '시간 종료' : '사격 완료';
+      statusText += ` | 🔴 세션 종료(${reasonTxt}) - 새 세션을 시작하세요`;
+    }
+    document.getElementById('status').innerText = statusText;
+
+    const nameTxt = data.user_name ? `[${data.user_name}] ` : '';
+    document.getElementById('total').innerText = `${nameTxt}Total: ${data.total} (${data.shots.length}/${data.max_shots})`;
+    document.getElementById('shotlist').innerText = data.shots.map((s,i)=>`${i+1}발: ${s}`).join('   ');
+
+    const timeEl = document.getElementById('timeLeft');
+    if (data.time_remaining !== null) {
+      timeEl.innerText = `⏱ 남은 시간: ${data.time_remaining}s`;
+      timeEl.className = data.time_remaining < 10 ? 'warn' : '';
+    } else {
+      timeEl.innerText = '';
+    }
+  });
+
+  fetch('/api/history').then(r => r.json()).then(data => {
+    const tbody = document.querySelector('#historyTable tbody');
+    tbody.innerHTML = '';
+    data.history.forEach(h => {
+      const reasonTxt = h.reason === 'time_up' ? '시간종료' : '사격완료';
+      const row = `<tr><td>${h.user_name}</td><td>${h.timestamp}</td><td>${h.shots.length}/${h.max_shots}</td><td>${h.total}</td><td>${reasonTxt}</td></tr>`;
+      tbody.innerHTML += row;
+    });
+  });
+}
+setInterval(refreshState, 500);
+refreshState();
+</script>
+</body>
+</html>
